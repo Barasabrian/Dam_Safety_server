@@ -1,47 +1,90 @@
+import time
 import json
+import pickle
+import numpy as np
 import paho.mqtt.client as mqtt
-import ssl
+from joblib import load
 
-# MQTT settings
-BROKER = "localhost"  
-PORT = 1883  # Standard MQTT over SSL port
-TOPIC_SUB = "dam/sensor-data"
-TOPIC_PUB = "dam/alerts"
+# Load the model
+model = load('random_forest_model.joblib')
 
-# Expert system processing logic
+# MQTT setup
+MQTT_BROKER = "localhost"  # Change to your broker address if needed
+PORT = 1883
+TOPIC_SENSOR_DATA = "dam/sensor-data"
+TOPIC_ALERTS = "dam/alerts"
+
+def publish_mqtt(client, topic, message):
+    """Publish a message to an MQTT topic."""
+    client.publish(topic, message)
+    print(f"Published to {topic}: {message}")
+
+def on_connect(client, userdata, flags, rc):
+    """Callback when connected to MQTT broker"""
+    print("Connected to MQTT broker with result code " + str(rc))
+    client.subscribe(TOPIC_SENSOR_DATA)
+
+def on_message(client, userdata, msg):
+    """Callback when a message is received from MQTT"""
+    try:
+        data = json.loads(msg.payload.decode())
+        # Process the sensor data
+        process_sensor_data(data['load_value'], data['tilt_status'], data['distance'])
+        # Process expert system logic
+        response = expert_system(data)
+        response_message = json.dumps(response)
+        publish_mqtt(client, TOPIC_ALERTS, response_message)
+    except json.JSONDecodeError:
+        print("Received data is not in JSON format")
+    except KeyError as e:
+        print(f"Missing key in data: {e}")
+
 def expert_system(data):
-    water_level = data.get("water_level")
-    strain = data.get("strain")
-    # Dam safety condition example: modify as per project requirements
-    if water_level > 5 and strain > 2:
+    """Process the expert system logic based on dam safety criteria."""
+    water_level = data.get("load_value")  # Adjust as needed
+    strain = data.get("tilt_status")  # Adjust as needed
+    if water_level > 5 and strain > 2:  # Example condition
         return {"alert": "High risk of dam overflow or structural issue"}
     return {"status": "normal"}
 
-# Callback function for when a message is received from MQTT
-def on_message(client, userdata, message):
-    try:
-        data = json.loads(message.payload.decode())
-        response = expert_system(data)
-        response_message = json.dumps(response)
-        # Publish response back to the specified topic
-        client.publish(TOPIC_PUB, response_message)
-        print(f"Processed data: {data}, Response: {response}")
-    except json.JSONDecodeError:
-        print("Received data is not in JSON format")
+def process_sensor_data(load_value, tilt_status, distance):
+    """Process sensor data and decide if an alert is needed."""
+    sensor_data = np.array([[load_value, tilt_status, distance]])
+    prediction = model.predict(sensor_data)
+    if prediction == 1:
+        alert_message = f"Alert! Abnormal conditions detected. Load: {load_value}, Tilt: {tilt_status}, Distance: {distance}"
+        publish_mqtt(mqtt_client, TOPIC_ALERTS, {"alert": alert_message})
+    else:
+        print("All conditions normal.")
 
-# Initialize MQTT client
-client = mqtt.Client()
+# MQTT client setup
+mqtt_client = mqtt.Client()
+mqtt_client.on_connect = on_connect
+mqtt_client.on_message = on_message
+mqtt_client.connect(MQTT_BROKER, PORT, 60)
+mqtt_client.loop_start()
 
-# Set up TLS/SSL settings
-#client.tls_set(ca_certs="/root/Dam_Safety_Server/ca.pem",    # Certificate authority, if required
- #              certfile="/root/Dam_Safety_Server/cert.pem",  # Your SSL certificate
-  #             keyfile="/root/Dam_Safety_Server/key.pem")    # Your SSL private key
+try:
+    print("Monitoring sensors...")
+    while True:
+        # Simulated sensor data (replace these with actual sensor data in practice)
+        load_value = np.random.randint(0, 1000)  # Placeholder for load sensor reading
+        tilt_status = np.random.choice([0, 1])  # Placeholder for tilt sensor reading
+        distance = np.random.uniform(0, 400)  # Placeholder for ultrasonic sensor reading
 
-# Define the connection and message handling callbacks
-client.on_connect = lambda client, userdata, flags, rc: client.subscribe(TOPIC_SUB)
-client.on_message = on_message
+        # Publish sensor data to MQTT
+        sensor_data = json.dumps({
+            "load_value": load_value,
+            "tilt_status": tilt_status,
+            "distance": distance
+        })
+        publish_mqtt(mqtt_client, TOPIC_SENSOR_DATA, sensor_data)
 
-# Connect to the MQTT broker with SSL/TLS
-client.connect(BROKER, PORT,keepalive=60)
-print(f"Connected securely to MQTT broker at {BROKER}:{PORT}")
-client.loop_forever()
+        time.sleep(5)  # Adjust this delay as needed
+
+except KeyboardInterrupt:
+    print("Shutting down.")
+finally:
+    mqtt_client.loop_stop()
+    mqtt_client.disconnect()
+
